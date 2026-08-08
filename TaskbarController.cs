@@ -1,4 +1,3 @@
-using System.Drawing;
 using System.Runtime.InteropServices;
 
 namespace BetterTaskBar;
@@ -16,35 +15,6 @@ public static class TaskbarController
             return true;
         }, IntPtr.Zero);
         return result;
-    }
-
-    public static Dictionary<IntPtr, Rectangle> TargetPositions()
-    {
-        var result = new Dictionary<IntPtr, Rectangle>();
-        var monitors = MonitorUtil.Enumerate();
-        foreach (var hwnd in FindAll())
-        {
-            var monitor = MatchMonitor(hwnd, monitors);
-            if (monitor is null)
-                continue;
-            int height = monitor.Bounds.Bottom - monitor.WorkArea.Bottom;
-            result[hwnd] = new Rectangle(
-                monitor.Bounds.Left,
-                monitor.Bounds.Bottom - height,
-                monitor.Bounds.Width,
-                height);
-        }
-        return result;
-    }
-
-    private static MonitorInfo2? MatchMonitor(IntPtr hwnd, List<MonitorInfo2> monitors)
-    {
-        NativeMethods.GetWindowRect(hwnd, out RECT rc);
-        var rect = new Rectangle(rc.Left, rc.Top, rc.Right - rc.Left, rc.Bottom - rc.Top);
-        return monitors
-            .OrderBy(m => Math.Abs(m.Bounds.Left - rect.Left))
-            .ThenBy(m => m.IsPrimary ? 0 : 1)
-            .FirstOrDefault();
     }
 
     public static void HideAll()
