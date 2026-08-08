@@ -8,6 +8,8 @@ public sealed class KeyboardHook : IDisposable
 
     private NativeMethods.HookProc? _proc;
     private IntPtr _hook = IntPtr.Zero;
+    private bool _winHeld;
+    private bool _otherKeyPressed;
 
     public void Install()
     {
@@ -26,14 +28,31 @@ public sealed class KeyboardHook : IDisposable
         if (nCode >= 0)
         {
             int msg = wParam.ToInt32();
-            if (msg == NativeMethods.WM_KEYDOWN || msg == NativeMethods.WM_SYSKEYDOWN)
+            var kb = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
+            bool injected = (kb.flags & NativeMethods.LLKHF_INJECTED) != 0;
+
+            if (!injected)
             {
-                var kb = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
-                if (kb.vkCode == NativeMethods.VK_LWIN || kb.vkCode == NativeMethods.VK_RWIN)
+                if (msg == NativeMethods.WM_KEYDOWN || msg == NativeMethods.WM_SYSKEYDOWN)
                 {
-                    bool injected = (kb.flags & NativeMethods.LLKHF_INJECTED) != 0;
-                    if (!injected)
-                        WinKeyPressed?.Invoke();
+                    if (kb.vkCode == NativeMethods.VK_LWIN || kb.vkCode == NativeMethods.VK_RWIN)
+                    {
+                        _winHeld = true;
+                        _otherKeyPressed = false;
+                    }
+                    else if (_winHeld)
+                    {
+                        _otherKeyPressed = true;
+                    }
+                }
+                else if (msg == NativeMethods.WM_KEYUP || msg == NativeMethods.WM_SYSKEYUP)
+                {
+                    if (kb.vkCode == NativeMethods.VK_LWIN || kb.vkCode == NativeMethods.VK_RWIN)
+                    {
+                        if (_winHeld && !_otherKeyPressed)
+                            WinKeyPressed?.Invoke();
+                        _winHeld = false;
+                    }
                 }
             }
         }

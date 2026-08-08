@@ -7,27 +7,22 @@ namespace BetterTaskBar;
 
 public sealed class TrayForm : Form
 {
-    private const int HotkeyId = 1;
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunValueName = "BetterTaskBar";
 
     private readonly NotifyIcon _icon;
-    private readonly System.Windows.Forms.Timer _fastTimer;
+    private readonly System.Windows.Forms.Timer _timer;
     private readonly ContextMenuStrip _menu;
     private readonly ToolStripMenuItem _toggleItem;
     private readonly ToolStripMenuItem _autoStartItem;
 
-    private AppSettings _settings;
     private KeyboardHook? _hook;
     private bool _revealed;
-    private DateTime _revealUntil;
-    private bool _initialAutohide;
     private bool _autohideApplied;
+    private bool _initialAutohide;
 
     public TrayForm()
     {
-        _settings = AppSettings.Load();
-
         Text = "BetterTaskBar";
         ShowInTaskbar = false;
         WindowState = FormWindowState.Minimized;
@@ -41,13 +36,10 @@ public sealed class TrayForm : Form
         };
 
         _toggleItem = new ToolStripMenuItem("Ukryj taskbar");
-        _toggleItem.Click += (_, _) => ToggleManual();
+        _toggleItem.Click += (_, _) => Toggle();
 
         _autoStartItem = new ToolStripMenuItem("Uruchamiaj z systemem Windows");
         _autoStartItem.Click += (_, _) => ToggleAutoStart();
-
-        var settingsItem = new ToolStripMenuItem("Ustawienia…");
-        settingsItem.Click += (_, _) => OpenSettings();
 
         var exitItem = new ToolStripMenuItem("Wyjdź");
         exitItem.Click += (_, _) => ExitApp();
@@ -56,17 +48,16 @@ public sealed class TrayForm : Form
         _menu.Items.Add(_toggleItem);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(_autoStartItem);
-        _menu.Items.Add(settingsItem);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(exitItem);
 
         _icon.ContextMenuStrip = _menu;
-        _icon.DoubleClick += (_, _) => OpenSettings();
+        _icon.DoubleClick += (_, _) => Toggle();
 
-        _fastTimer = new System.Windows.Forms.Timer { Interval = 50 };
-        _fastTimer.Tick += (_, _) => FastTick();
+        _timer = new System.Windows.Forms.Timer { Interval = 50 };
+        _timer.Tick += (_, _) => SyncState();
 
-        _autoStartItem.Checked = _settings.AutoStart;
+        _autoStartItem.Checked = IsAutoStartEnabled();
         _ = Handle;
     }
 
@@ -88,7 +79,7 @@ public sealed class TrayForm : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        RestoreTaskbars();
+        Restore();
         base.OnFormClosing(e);
     }
 
@@ -96,15 +87,12 @@ public sealed class TrayForm : Form
     {
         switch (m.Msg)
         {
-            case NativeMethods.WM_HOTKEY when m.WParam.ToInt32() == HotkeyId:
-                Reveal();
-                break;
             case NativeMethods.WM_DISPLAYCHANGE:
                 SyncState();
                 break;
             case NativeMethods.WM_QUERYENDSESSION:
             case NativeMethods.WM_ENDSESSION:
-                RestoreTaskbars();
+                Restore();
                 break;
         }
         base.WndProc(ref m);
@@ -112,45 +100,23 @@ public sealed class TrayForm : Form
 
     private void Start()
     {
-        ApplyAutoStartRegistry();
         _initialAutohide = TaskbarController.IsAutohide();
         _hook = new KeyboardHook();
         _hook.WinKeyPressed += OnWinKey;
         _hook.Install();
-        RegisterHotkey();
-        UpdateToggleMenuText();
-        _fastTimer.Start();
+        _timer.Start();
         SyncState();
-        if (AppSettings.IsFirstRun())
-            OpenSettings();
     }
 
     private void OnWinKey()
     {
-        if (!_settings.WinKeyReveals)
-            return;
-        BeginInvoke(new Action(Reveal));
+        BeginInvoke(new Action(Toggle));
     }
 
-    private void Reveal()
+    private void Toggle()
     {
-        if (_settings.RevealSeconds <= 0)
-        {
-            _revealed = !_revealed;
-            UpdateToggleMenuText();
-            return;
-        }
-
-        _revealed = true;
-        _revealUntil = DateTime.Now.AddSeconds(_settings.RevealSeconds);
-        UpdateToggleMenuText();
-    }
-
-    private void FastTick()
-    {
-        if (_revealed && _settings.RevealSeconds > 0 && DateTime.Now >= _revealUntil)
-            _revealed = false;
-
+        _revealed = !_revealed;
+        _toggleItem.Text = _revealed ? "Ukryj taskbar" : "Pokaż taskbar";
         SyncState();
     }
 
@@ -169,33 +135,29 @@ public sealed class TrayForm : Form
             TaskbarController.HideAll();
     }
 
-    private void ToggleManual()
-    {
-        if (_revealed)
-        {
-            _revealed = false;
-            UpdateToggleMenuText();
-        }
-        else
-        {
-            Reveal();
-        }
-    }
-
     private void ToggleAutoStart()
     {
-        _settings.AutoStart = !_settings.AutoStart;
-        ApplyAutoStartRegistry();
-        _autoStartItem.Checked = _settings.AutoStart;
-        _settings.Save();
+        bool enable = !_autoStartItem.Checked;
+        SetAutoStart(enable);
+        _autoStartItem.Checked = enable;
     }
 
-    private void ApplyAutoStartRegistry()
+    private static bool IsAutoStartEnabled()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath);
+            return key?.GetValue(RunValueName) is not null;
+        }
+        catch { return false; }
+    }
+
+    private static void SetAutoStart(bool enable)
     {
         try
         {
             using var key = Registry.CurrentUser.CreateSubKey(RunKeyPath);
-            if (_settings.AutoStart)
+            if (enable)
                 key.SetValue(RunValueName, $"\"{Application.ExecutablePath}\"");
             else
                 key.DeleteValue(RunValueName, false);
@@ -203,52 +165,16 @@ public sealed class TrayForm : Form
         catch { }
     }
 
-    private void RegisterHotkey()
-    {
-        NativeMethods.UnregisterHotKey(Handle, HotkeyId);
-        if (!_settings.UseCustomHotkey || _settings.CustomHotkeyCode == 0)
-            return;
-
-        uint mods = NativeMethods.MOD_NOREPEAT;
-        var m = (Keys)_settings.CustomHotkeyModifiers;
-        if ((m & Keys.Control) != 0) mods |= NativeMethods.MOD_CONTROL;
-        if ((m & Keys.Alt) != 0) mods |= NativeMethods.MOD_ALT;
-        if ((m & Keys.Shift) != 0) mods |= NativeMethods.MOD_SHIFT;
-
-        bool ok = NativeMethods.RegisterHotKey(Handle, HotkeyId, mods, (uint)_settings.CustomHotkeyCode);
-        if (!ok)
-            MessageBox.Show("Nie udało się zarejestrować własnego skrótu (może być już zajęty).",
-                "BetterTaskBar", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-    }
-
-    private void OpenSettings()
-    {
-        using var form = new SettingsForm(_settings);
-        if (form.ShowDialog(this) != DialogResult.OK)
-            return;
-
-        _settings = form.Result;
-        _settings.Save();
-        ApplyAutoStartRegistry();
-        _autoStartItem.Checked = _settings.AutoStart;
-        RegisterHotkey();
-        UpdateToggleMenuText();
-    }
-
-    private void UpdateToggleMenuText()
-    {
-        _toggleItem.Text = _revealed ? "Ukryj taskbar" : "Pokaż taskbar";
-    }
-
-    private void RestoreTaskbars()
+    private void Restore()
     {
         TaskbarController.ShowAll();
         TaskbarController.SetAutohide(_initialAutohide);
-    }    private void ExitApp()
+    }
+
+    private void ExitApp()
     {
         _icon.Visible = false;
         _icon.Dispose();
-        NativeMethods.UnregisterHotKey(Handle, HotkeyId);
         _hook?.Dispose();
         Application.Exit();
     }
