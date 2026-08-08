@@ -22,6 +22,7 @@ public sealed class TrayForm : Form
     private bool _revealed;
     private DateTime _revealUntil;
     private bool _initialAutohide;
+    private Dictionary<IntPtr, Rectangle> _positions = new();
 
     public TrayForm()
     {
@@ -62,7 +63,7 @@ public sealed class TrayForm : Form
         _icon.ContextMenuStrip = _menu;
         _icon.DoubleClick += (_, _) => OpenSettings();
 
-        _fastTimer = new System.Windows.Forms.Timer { Interval = 300 };
+        _fastTimer = new System.Windows.Forms.Timer { Interval = 50 };
         _fastTimer.Tick += (_, _) => FastTick();
 
         _autoStartItem.Checked = _settings.AutoStart;
@@ -113,7 +114,8 @@ public sealed class TrayForm : Form
     {
         ApplyAutoStartRegistry();
         _initialAutohide = TaskbarController.IsAutohide();
-        TaskbarController.SetAutohide(false);
+        RefreshPositions();
+        TaskbarController.SetAutohide(true);
         _hook = new KeyboardHook();
         _hook.WinKeyPressed += OnWinKey;
         _hook.Install();
@@ -151,18 +153,41 @@ public sealed class TrayForm : Form
         if (_revealed && _settings.RevealSeconds > 0 && DateTime.Now >= _revealUntil)
             _revealed = false;
 
+        var bars = TaskbarController.FindAll();
+        if (bars.Count != _positions.Count || bars.Any(h => !_positions.ContainsKey(h)))
+            RefreshPositions();
+
         if (_revealed)
-            TaskbarController.ShowAll();
+            RepositionAndShow(bars);
         else
             TaskbarController.HideAll();
     }
 
     private void ApplyState()
     {
+        var bars = TaskbarController.FindAll();
         if (_revealed)
-            TaskbarController.ShowAll();
+            RepositionAndShow(bars);
         else
             TaskbarController.HideAll();
+    }
+
+    private void RefreshPositions()
+    {
+        _positions = TaskbarController.TargetPositions();
+    }
+
+    private void RepositionAndShow(List<IntPtr> bars)
+    {
+        foreach (var hwnd in bars)
+        {
+            if (_positions.TryGetValue(hwnd, out var r))
+            {
+                NativeMethods.SetWindowPos(hwnd, NativeMethods.HWND_TOPMOST, r.X, r.Y, r.Width, r.Height,
+                    NativeMethods.SWP_NOACTIVATE);
+            }
+            NativeMethods.ShowWindow(hwnd, NativeMethods.SW_SHOW);
+        }
     }
 
     private void ToggleManual()
